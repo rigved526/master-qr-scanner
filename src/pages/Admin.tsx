@@ -1,156 +1,174 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
-import { UserPlus } from "lucide-react";
+import { Upload, Plus } from "lucide-react";
 
 const Admin = () => {
-  const [formData, setFormData] = useState({
-    ticketCode: "",
-    attendeeName: "",
-    eventName: "",
-  });
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [ticketCode, setTicketCode] = useState("");
+  const [attendeeName, setAttendeeName] = useState("");
+  const [eventName, setEventName] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setIsSubmitting(true);
+    setIsLoading(true);
 
-    try {
-      // Check if ticket code already exists
-      const { data: existing } = await supabase
-        .from("attendees")
-        .select("ticket_code")
-        .eq("ticket_code", formData.ticketCode)
-        .single();
+    const { error } = await supabase.from("tickets").insert({
+      ticket_code: ticketCode,
+      attendee_name: attendeeName,
+      event_name: eventName,
+    });
 
-      if (existing) {
-        toast.error("Ticket code already exists in database");
-        setIsSubmitting(false);
+    if (error) {
+      toast.error("Failed to register attendee");
+    } else {
+      toast.success("Attendee registered successfully!");
+      setTicketCode("");
+      setAttendeeName("");
+      setEventName("");
+    }
+
+    setIsLoading(false);
+  };
+
+  const handleCSVUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsLoading(true);
+    const reader = new FileReader();
+
+    reader.onload = async (event) => {
+      const text = event.target?.result as string;
+      const rows = text.split('\n').slice(1); // Skip header row
+      
+      const tickets = rows
+        .filter(row => row.trim()) // Filter empty rows
+        .map(row => {
+          const [ticket_code, attendee_name, event_name] = row.split(',').map(cell => cell.trim());
+          return { ticket_code, attendee_name, event_name };
+        })
+        .filter(ticket => ticket.ticket_code && ticket.attendee_name && ticket.event_name);
+
+      if (tickets.length === 0) {
+        toast.error("No valid data found in CSV");
+        setIsLoading(false);
         return;
       }
 
-      // Add new attendee
-      const { error } = await supabase.from("attendees").insert({
-        ticket_code: formData.ticketCode,
-        attendee_name: formData.attendeeName,
-        event_name: formData.eventName,
-      });
+      const { error } = await supabase.from("tickets").insert(tickets);
 
-      if (error) throw error;
+      if (error) {
+        toast.error("Failed to import CSV data");
+        console.error(error);
+      } else {
+        toast.success(`Successfully imported ${tickets.length} attendees!`);
+      }
 
-      toast.success(`Successfully registered ${formData.attendeeName} for ${formData.eventName}`);
-      
-      // Reset form
-      setFormData({
-        ticketCode: "",
-        attendeeName: "",
-        eventName: "",
-      });
-    } catch (error) {
-      console.error("Error adding attendee:", error);
-      toast.error("Failed to register attendee. Please try again.");
-    } finally {
-      setIsSubmitting(false);
-    }
+      setIsLoading(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    };
+
+    reader.readAsText(file);
   };
 
   return (
     <div className="min-h-screen bg-background p-8">
-      <div className="max-w-2xl mx-auto">
-        <div className="flex justify-between items-center mb-8">
+      <div className="max-w-2xl mx-auto space-y-6">
+        <div className="flex justify-between items-center">
           <h1 className="text-4xl font-bold">Admin Panel</h1>
           <div className="space-x-4">
-            <Button variant="secondary" onClick={() => navigate("/")}>
-              Scanner
-            </Button>
+            <Button onClick={() => navigate("/")}>Scanner</Button>
             <Button variant="secondary" onClick={() => navigate("/dashboard")}>
               Dashboard
             </Button>
           </div>
         </div>
 
+        {/* CSV Upload Card */}
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <UserPlus className="h-5 w-5" />
-              On-Spot Registration
-            </CardTitle>
+            <CardTitle>Bulk Import via CSV</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <p className="text-sm text-muted-foreground">
+              Upload a CSV file with columns: ticket_code, attendee_name, event_name
+            </p>
+            <div className="flex gap-2">
+              <Input
+                ref={fileInputRef}
+                type="file"
+                accept=".csv"
+                onChange={handleCSVUpload}
+                disabled={isLoading}
+                className="flex-1"
+              />
+              <Button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isLoading}
+                className="gap-2"
+              >
+                <Upload className="w-4 h-4" />
+                Upload CSV
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Single Entry Card */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Register Single Attendee</CardTitle>
           </CardHeader>
           <CardContent>
-            <form onSubmit={handleSubmit} className="space-y-6">
+            <form onSubmit={handleSubmit} className="space-y-4">
               <div className="space-y-2">
-                <Label htmlFor="ticketCode">Ticket Code *</Label>
+                <Label htmlFor="ticketCode">Ticket Code</Label>
                 <Input
                   id="ticketCode"
-                  placeholder="Enter unique ticket code"
-                  value={formData.ticketCode}
-                  onChange={(e) =>
-                    setFormData({ ...formData, ticketCode: e.target.value })
-                  }
+                  value={ticketCode}
+                  onChange={(e) => setTicketCode(e.target.value)}
+                  placeholder="Enter ticket code"
                   required
                 />
-                <p className="text-sm text-muted-foreground">
-                  This should be a unique identifier for the ticket
-                </p>
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="attendeeName">Attendee Name *</Label>
+                <Label htmlFor="attendeeName">Attendee Name</Label>
                 <Input
                   id="attendeeName"
-                  placeholder="Enter attendee full name"
-                  value={formData.attendeeName}
-                  onChange={(e) =>
-                    setFormData({ ...formData, attendeeName: e.target.value })
-                  }
+                  value={attendeeName}
+                  onChange={(e) => setAttendeeName(e.target.value)}
+                  placeholder="Enter attendee name"
                   required
                 />
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="eventName">Event Name *</Label>
+                <Label htmlFor="eventName">Event Name</Label>
                 <Input
                   id="eventName"
-                  placeholder="e.g., Illuminate, Finbiz, or other event"
-                  value={formData.eventName}
-                  onChange={(e) =>
-                    setFormData({ ...formData, eventName: e.target.value })
-                  }
+                  value={eventName}
+                  onChange={(e) => setEventName(e.target.value)}
+                  placeholder="e.g., Illuminate, Finbiz"
                   required
                 />
-                <p className="text-sm text-muted-foreground">
-                  Event-specific colors will be shown during check-in
-                </p>
               </div>
 
-              <Button type="submit" className="w-full" disabled={isSubmitting}>
-                {isSubmitting ? "Registering..." : "Register Attendee"}
+              <Button type="submit" className="w-full gap-2" disabled={isLoading}>
+                <Plus className="w-4 h-4" />
+                {isLoading ? "Registering..." : "Register Attendee"}
               </Button>
             </form>
-
-            <div className="mt-8 p-4 bg-muted rounded-lg">
-              <h3 className="font-semibold mb-2">Event Color Guide:</h3>
-              <ul className="space-y-1 text-sm">
-                <li className="flex items-center gap-2">
-                  <span className="w-4 h-4 rounded bg-illuminate"></span>
-                  <span>Illuminate - Blue</span>
-                </li>
-                <li className="flex items-center gap-2">
-                  <span className="w-4 h-4 rounded bg-finbiz"></span>
-                  <span>Finbiz - Yellow</span>
-                </li>
-                <li className="flex items-center gap-2">
-                  <span className="w-4 h-4 rounded bg-success"></span>
-                  <span>Other Events - Green</span>
-                </li>
-              </ul>
-            </div>
           </CardContent>
         </Card>
       </div>

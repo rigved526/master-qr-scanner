@@ -1,181 +1,208 @@
-import { useEffect, useState, useRef } from "react";
-import { Html5QrcodeScanner } from "html5-qrcode";
-import { supabase } from "@/integrations/supabase/client";
-import { CheckCircle2, XCircle, AlertCircle } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { useState, useEffect, useRef } from "react";
+import { Html5Qrcode } from "html5-qrcode";
 import { useNavigate } from "react-router-dom";
+import { supabase } from "@/integrations/supabase/client";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { CheckCircle, XCircle, Scan, LayoutDashboard, AlertCircle } from "lucide-react";
+import { toast } from "sonner";
 
 const Scanner = () => {
-  const [scanResult, setScanResult] = useState<{
-    status: "success" | "error" | "already-checked" | null;
-    message: string;
-    event: string;
-  } | null>(null);
-  const [isScanning, setIsScanning] = useState(true);
-  const scannerRef = useRef<Html5QrcodeScanner | null>(null);
+  const [scanning, setScanning] = useState(false);
+  const [result, setResult] = useState<{ status: 'valid' | 'invalid' | 'duplicate', message: string, eventName?: string } | null>(null);
+  const scannerRef = useRef<Html5Qrcode | null>(null);
   const navigate = useNavigate();
 
-  useEffect(() => {
-    if (!isScanning) return;
+  const startScanner = async () => {
+    try {
+      const html5QrCode = new Html5Qrcode("reader");
+      scannerRef.current = html5QrCode;
+      
+      await html5QrCode.start(
+        { facingMode: "environment" },
+        {
+          fps: 10,
+          qrbox: { width: 250, height: 250 }
+        },
+        onScanSuccess,
+        () => {} // onScanFailure - silent
+      );
+      
+      setScanning(true);
+      setResult(null);
+    } catch (err) {
+      toast.error("Failed to start camera");
+      console.error(err);
+    }
+  };
 
-    const scanner = new Html5QrcodeScanner(
-      "qr-reader",
-      { 
-        fps: 10, 
-        qrbox: { width: 250, height: 250 },
-        aspectRatio: 1.0
-      },
-      false
-    );
-
-    scanner.render(
-      async (decodedText) => {
-        setIsScanning(false);
-        scanner.clear();
-        
-        // Look up ticket in database
-        const { data: attendee, error: attendeeError } = await supabase
-          .from("attendees")
-          .select("*")
-          .eq("ticket_code", decodedText)
-          .single();
-
-        if (attendeeError || !attendee) {
-          setScanResult({
-            status: "error",
-            message: "Not registered. Please recheck entry or register on spot.",
-            event: "",
-          });
-          return;
-        }
-
-        // Check if already checked in
-        const { data: existingCheckIn } = await supabase
-          .from("check_ins")
-          .select("*")
-          .eq("ticket_code", decodedText)
-          .single();
-
-        if (existingCheckIn) {
-          setScanResult({
-            status: "already-checked",
-            message: `Already checked in for ${existingCheckIn.event_name}`,
-            event: existingCheckIn.event_name,
-          });
-          return;
-        }
-
-        // Record check-in
-        const { error: checkInError } = await supabase
-          .from("check_ins")
-          .insert({
-            ticket_code: attendee.ticket_code,
-            attendee_name: attendee.attendee_name,
-            event_name: attendee.event_name,
-          });
-
-        if (checkInError) {
-          setScanResult({
-            status: "error",
-            message: "Error recording check-in. Please try again.",
-            event: "",
-          });
-          return;
-        }
-
-        setScanResult({
-          status: "success",
-          message: `Verified - ${attendee.attendee_name}`,
-          event: attendee.event_name,
-        });
-      },
-      (error) => {
-        console.error("Scan error:", error);
+  const stopScanner = async () => {
+    if (scannerRef.current) {
+      try {
+        await scannerRef.current.stop();
+        scannerRef.current.clear();
+      } catch (err) {
+        console.error("Error stopping scanner:", err);
       }
-    );
+    }
+    setScanning(false);
+  };
 
-    scannerRef.current = scanner;
+  const onScanSuccess = async (decodedText: string) => {
+    await stopScanner();
+    
+    // Check if ticket exists
+    const { data: ticket, error: ticketError } = await supabase
+      .from('tickets')
+      .select('*')
+      .eq('ticket_code', decodedText)
+      .maybeSingle();
 
+    if (ticketError) {
+      setResult({ status: 'invalid', message: 'Error checking ticket' });
+      toast.error("Error checking ticket");
+      return;
+    }
+
+    if (!ticket) {
+      setResult({ status: 'invalid', message: 'Not registered. Please recheck entry or register on spot.' });
+      toast.error("Invalid ticket");
+      return;
+    }
+
+    // Check if already checked in
+    if (ticket.checked_in_at) {
+      setResult({ status: 'duplicate', message: `Already checked in for ${ticket.event_name}`, eventName: ticket.event_name });
+      toast.error("Ticket already used");
+      return;
+    }
+
+    // Valid check-in - update ticket
+    const { error: checkInError } = await supabase
+      .from('tickets')
+      .update({ checked_in_at: new Date().toISOString() })
+      .eq('id', ticket.id);
+
+    if (checkInError) {
+      setResult({ status: 'invalid', message: 'Error recording check-in' });
+      toast.error("Error recording check-in");
+      return;
+    }
+
+    setResult({ status: 'valid', message: `Verified - ${ticket.attendee_name}`, eventName: ticket.event_name });
+    toast.success(`Checked in: ${ticket.attendee_name}`);
+  };
+
+  useEffect(() => {
     return () => {
       if (scannerRef.current) {
-        scannerRef.current.clear().catch(console.error);
+        scannerRef.current.stop().catch(console.error);
       }
     };
-  }, [isScanning]);
+  }, []);
 
   const getBackgroundColor = () => {
-    if (!scanResult) return "bg-background";
+    if (!result) return "bg-gradient-to-br from-background via-background to-primary/5";
     
-    if (scanResult.status === "error") return "bg-error";
-    if (scanResult.status === "already-checked") return "bg-alreadyChecked";
+    if (result.status === "invalid") return "bg-error";
+    if (result.status === "duplicate") return "bg-alreadyChecked";
     
-    // Event-specific colors for success
-    const eventLower = scanResult.event.toLowerCase();
+    // Event-specific colors for valid check-ins
+    const eventLower = result.eventName?.toLowerCase() || "";
     if (eventLower.includes("illuminate")) return "bg-illuminate";
     if (eventLower.includes("finbiz")) return "bg-finbiz";
     return "bg-success";
   };
 
-  const getIcon = () => {
-    if (!scanResult) return null;
-    
-    if (scanResult.status === "error") 
-      return <XCircle className="w-24 h-24 text-error-foreground" />;
-    if (scanResult.status === "already-checked") 
-      return <AlertCircle className="w-24 h-24 text-alreadyChecked-foreground" />;
-    return <CheckCircle2 className="w-24 h-24 text-success-foreground" />;
-  };
-
-  const resetScanner = () => {
-    setScanResult(null);
-    setIsScanning(true);
-  };
-
   return (
-    <div className={`min-h-screen flex flex-col items-center justify-center transition-colors duration-300 ${getBackgroundColor()}`}>
-      <div className="w-full max-w-4xl p-8">
-        <div className="flex justify-between items-center mb-8">
-          <h1 className="text-3xl font-bold text-foreground">Event Check-In Scanner</h1>
-          <div className="space-x-4">
-            <Button variant="secondary" onClick={() => navigate("/dashboard")}>
-              Dashboard
-            </Button>
-            <Button variant="secondary" onClick={() => navigate("/admin")}>
-              Admin Panel
-            </Button>
+    <div className={`min-h-screen p-4 transition-colors duration-500 ${getBackgroundColor()}`}>
+      <div className="max-w-2xl mx-auto space-y-6">
+        {/* Header */}
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-3xl font-bold text-foreground">Event Scanner</h1>
+            <p className="text-muted-foreground">Scan barcode or QR code</p>
           </div>
+          <Button
+            variant="outline"
+            onClick={() => navigate('/dashboard')}
+            className="gap-2"
+          >
+            <LayoutDashboard className="w-4 h-4" />
+            Dashboard
+          </Button>
         </div>
 
-        {isScanning && !scanResult && (
-          <div className="bg-card rounded-lg p-6 shadow-xl">
-            <div id="qr-reader" className="w-full"></div>
-            <p className="text-center mt-4 text-muted-foreground">
-              Position the QR code within the frame to scan
-            </p>
-          </div>
+        {/* Scanner Card */}
+        {!result && (
+          <Card className="p-6 space-y-4">
+            <div id="reader" className="w-full rounded-lg overflow-hidden" />
+            
+            {!scanning && (
+              <Button
+                onClick={startScanner}
+                className="w-full gap-2 bg-primary hover:bg-primary/90"
+                size="lg"
+              >
+                <Scan className="w-5 h-5" />
+                Start Scanning
+              </Button>
+            )}
+
+            {scanning && (
+              <Button
+                onClick={stopScanner}
+                variant="outline"
+                className="w-full"
+                size="lg"
+              >
+                Stop Scanning
+              </Button>
+            )}
+          </Card>
         )}
 
-        {scanResult && (
-          <div className="flex flex-col items-center justify-center space-y-8 py-12">
-            {getIcon()}
-            <div className="text-center space-y-4">
-              <h2 className="text-4xl font-bold text-white">
-                {scanResult.status === "success" ? "VERIFIED" : 
-                 scanResult.status === "already-checked" ? "ALREADY CHECKED IN" : "NOT REGISTERED"}
-              </h2>
-              <p className="text-2xl text-white">{scanResult.message}</p>
-              {scanResult.event && (
-                <p className="text-xl text-white opacity-90">Event: {scanResult.event}</p>
-              )}
-            </div>
-            <Button 
-              size="lg" 
-              onClick={resetScanner}
-              className="mt-8"
+        {/* Result Display */}
+        {result && (
+          <Card className={`p-8 text-center space-y-4 transition-all duration-500 ${
+            result.status === 'valid' 
+              ? 'bg-transparent border-white/20' 
+              : 'bg-transparent border-white/20'
+          }`}>
+            {result.status === 'valid' && (
+              <>
+                <CheckCircle className="w-20 h-20 mx-auto text-white animate-in zoom-in duration-500" />
+                <h2 className="text-2xl font-bold text-white">VERIFIED</h2>
+              </>
+            )}
+            {result.status === 'invalid' && (
+              <>
+                <XCircle className="w-20 h-20 mx-auto text-white animate-in zoom-in duration-500" />
+                <h2 className="text-2xl font-bold text-white">NOT REGISTERED</h2>
+              </>
+            )}
+            {result.status === 'duplicate' && (
+              <>
+                <AlertCircle className="w-20 h-20 mx-auto text-white animate-in zoom-in duration-500" />
+                <h2 className="text-2xl font-bold text-white">ALREADY CHECKED IN</h2>
+              </>
+            )}
+            <p className="text-lg text-white">{result.message}</p>
+            {result.eventName && (
+              <p className="text-md text-white/80">Event: {result.eventName}</p>
+            )}
+            
+            <Button
+              onClick={() => {
+                setResult(null);
+                startScanner();
+              }}
+              className="mt-4 gap-2 bg-white text-primary hover:bg-white/90"
             >
+              <Scan className="w-4 h-4" />
               Scan Next Attendee
             </Button>
-          </div>
+          </Card>
         )}
       </div>
     </div>
